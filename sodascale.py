@@ -23,6 +23,8 @@ import json
 import re
 import uuid
 import time
+import subprocess
+
 from boto.dynamodb2.items import Item
 from boto.dynamodb2.table import Table
 from boto.ec2.connection import EC2Connection
@@ -33,7 +35,7 @@ from fabric.contrib.console import confirm
 MAXIMUM_NUMBER_OF_ATTEMPTS = 12
 
 config = {}
-with open("config.soda") as f:
+with open("/tmp/config.soda") as f:
     for line in f:
        (key, val) = line.strip().split(":")
        config[key] = val
@@ -42,6 +44,8 @@ with open("config.soda") as f:
 AWS_ACCESS_KEY = config['aws_access_key']
 AWS_SECRET_KEY = config['aws_secret_key']
 env.key_filename = config['ssh_key']
+
+preTimestamp = int(time.time())
 
 conn = EC2Connection(AWS_ACCESS_KEY, AWS_SECRET_KEY)
 
@@ -115,8 +119,21 @@ def find_matched_running_test_instance(imageId, type):
         if (instance.image_id == imageId and instance.state == 'running' and instance.instance_type == type):           
             groups = instance.groups
             if (groups and groups[0].name == "ROAR-Test-Server") :
-                print "Find existing instance to reuse " + instance.id + " " + instance.instance_type
+                print "Find existing instance to reuse " + instance.id + " " + instance.instance_type + " " + instance.public_dns_name
                 return [instance]
+
+# Try to find an existing running instance with the given AMI and Type
+# We hardcoded the security group, but can be easily changed
+def find_running_load_servers():
+    load_servers = []
+    instanceList = conn.get_only_instances()
+    for instance in instanceList:
+        if (instance.state == 'running'):
+            groups = instance.groups
+            if (groups and groups[0].name.startswith('ROARTestDriver')) :
+                print "Find existing load servers " + instance.id + " " + instance.instance_type + " " + instance.public_dns_name
+                load_servers.append('http://' + instance.public_dns_name)
+    return load_servers
 
 def deploy_docker_instance(keyname,userdata="docker",type="t1.micro",securitygroup="docker-ec2"):
     deploy(ami="ami-3be88052",
@@ -585,13 +602,30 @@ def teardown():
 # I have not figured out how to use the keys in our config file 
 def save_benchmark_test_record(containerId, instanceType, testId, notes):
     BenchmarkTable = Table('BenchmarkRecord')
+    global preTimestamp
+    timestamp = int(time.time())    
+    if timestamp == preTimestamp:
+        timestamp = timestamp + 1
+        preTimestamp = timestamp
 
     BenchmarkTable.put_item(data={
         'containerId': containerId,
-        'timestamp': int(time.time()),
+        'timestamp': timestamp,
         'instanceType' : instanceType,
         'testId': testId,
         'notes': notes,
+    })
+
+# Note: DynamoDb client here replies on the ~/.boto config for AWs
+# I have not figured out how to use the keys in our config file 
+def save_colocation_benchmark_test_record(timestamp, containerId, instanceType, testId):
+    BenchmarkTable = Table('ColocationRecord')    
+
+    BenchmarkTable.put_item(data={
+        'timestamp': timestamp,
+        'containerId': containerId,
+        'instanceType' : instanceType,
+        'testId': testId,
     })
 
 def run_experiment(name,with_nodes=None):
